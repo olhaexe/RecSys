@@ -6,33 +6,9 @@ from scipy.sparse import csr_matrix
 
 # Матричная факторизация
 from implicit.als import AlternatingLeastSquares
+from implicit.bpr import BayesianPersonalizedRanking
 from implicit.nearest_neighbours import ItemItemRecommender  # нужен для одного трюка
 from implicit.nearest_neighbours import bm25_weight, tfidf_weight
-
-def get_recommendations(user, model, sparse_user_item, N=5):
-    """Рекомендуем топ-N товаров"""
-
-    res = [id_to_itemid[rec[0]] for rec in
-           model.recommend(userid=userid_to_id[user],
-                           user_items=sparse_user_item,  # на вход user-item matrix
-                           N=N,
-                           filter_already_liked_items=False,
-                           filter_items=[itemid_to_id[9999999]],  # !!!
-                           recalculate_user=False)]
-    return res
-
-def get_rec(model, ctm, x):
-    # Тут нет фильтрации по СТМ !! - в ДЗ нужно будет добавить
-    recs = model.similar_items(itemid_to_id[x], N=50)  # Returns list of (itemid, score) tuples, sorted by score
-    score = 0
-    for item in recs:
-        if item[0] not in ctm:
-            recs.remove(item)
-
-    top_rec = recs[1][0]
-
-    return id_to_itemid[top_rec]
-
 
 class MainRecommender:
     """Рекомендации, которые можно получить из ALS
@@ -58,7 +34,7 @@ class MainRecommender:
         self.overall_top_purchases = self.overall_top_purchases.item_id.tolist()
 
         self.user_item_matrix = self.prepare_matrix(data)  # pd.DataFrame
-        self.id_to_itemid, self.id_to_userid, self.itemid_to_id, self.userid_to_id = prepare_dicts(self.user_item_matrix)
+        self.id_to_itemid, self.id_to_userid, self.itemid_to_id, self.userid_to_id = self.prepare_dicts(self.user_item_matrix)
 
         # Словарь {item_id: 0/1}. 0/1 - факт принадлежности товара к СТМ
         self.item_id_to_ctm = {}
@@ -79,7 +55,7 @@ class MainRecommender:
     @staticmethod
     def prepare_matrix(data):
 
-        user_item_matrix = pd.pivot_table(data_train,
+        user_item_matrix = pd.pivot_table(data,
                                           index='user_id', columns='item_id',
                                           values='quantity',  # Можно пробовать другие варианты
                                           aggfunc='count',
@@ -120,11 +96,11 @@ class MainRecommender:
     def fit(user_item_matrix, n_factors=20, regularization=0.001, iterations=15, num_threads=4):
         """Обучает ALS"""
 
-        model = AlternatingLeastSquares(factors=factors,
+        model = AlternatingLeastSquares(factors=n_factors,
                                         regularization=regularization,
                                         iterations=iterations,
                                         num_threads=num_threads)
-        model.fit(csr_matrix(self.user_item_matrix).T.tocsr())
+        model.fit(csr_matrix(user_item_matrix).T.tocsr())
 
         return model
 
@@ -132,11 +108,11 @@ class MainRecommender:
     def fit_bpr(user_item_matrix, n_factors=20, regularization=0.001, iterations=15, num_threads=4):
         """Обучает BPR"""
 
-        model_bpr = BayesianPersonalizedRanking(factors=factors,
+        model_bpr = BayesianPersonalizedRanking(factors=n_factors,
                                                 regularization=regularization,
                                                 iterations=iterations,
                                                 num_threads=num_threads)
-        model_bpr.fit(csr_matrix(self.user_item_matrix).T.tocsr())
+        model_bpr.fit(csr_matrix(user_item_matrix).T.tocsr())
 
         return model_bpr
 
@@ -146,10 +122,10 @@ class MainRecommender:
         if filter_ctm:
             # ctm = item_features[item_features['brand'] == 'Private'].item_id.unique()
             ctm = [key for key, value in self.item_id_to_ctm.items() if value == 1]
-            popularity = data_train[~data_train['item_id'].isin(ctm)].groupby([user, 'item_id'])[
+            popularity = self.data[~self.data['item_id'].isin(ctm)].groupby([user, 'item_id'])[
                 'quantity'].count().reset_index()
         else:
-            popularity = data_train.groupby([user, 'item_id'])['quantity'].count().reset_index()
+            popularity = self.data.groupby([user, 'item_id'])['quantity'].count().reset_index()
         popularity.sort_values('quantity', ascending=False, inplace=True)
 
         popularity = popularity[popularity['item_id'] != 9999999]
@@ -160,16 +136,16 @@ class MainRecommender:
         res = []
         for x in popularity['item_id']:
             if filter_ctm:
-                recs = model.similar_items(itemid_to_id[x],
+                recs = self.model.similar_items(self.itemid_to_id[x],
                                            N=50)  # Returns list of (itemid, score) tuples, sorted by score
                 for item in recs:
                     if item[0] not in ctm:
                         recs.remove(item)
             else:
-                recs = model.similar_items(itemid_to_id[x], N=2)
+                recs = self.model.similar_items(self.itemid_to_id[x], N=2)
 
             top_rec = recs[1][0]
-            res.append(id_to_itemid[top_rec])
+            res.append(self.id_to_itemid[top_rec])
 
         # your_code
         # Практически полностью реализовали на прошлом вебинаре
@@ -180,12 +156,35 @@ class MainRecommender:
     def get_similar_users_recommendation(self, user, N=5):
         """Рекомендуем топ-N товаров, среди купленных похожими юзерами"""
 
-        recs = model.similar_users(userid_to_id[user], N=N+1)
+        recs = self.model.similar_users(self.userid_to_id[user], N=N+1)
 
         own_recommender_res = self.own_recommender
 
-        res = [id_to_itemid[rec[0]] for rec in recs if rec not in own_recommender_res[0]]
+        res = [self.id_to_itemid[rec[0]] for rec in recs if rec not in own_recommender_res[0]]
 
         return res
 
 
+#def get_recommendations(user, model, sparse_user_item, N=5):
+    """Рекомендуем топ-N товаров"""
+
+#    res = [id_to_itemid[rec[0]] for rec in
+#           model.recommend(userid=userid_to_id[user],
+#                           user_items=sparse_user_item,  # на вход user-item matrix
+#                           N=N,
+#                           filter_already_liked_items=False,
+#                           filter_items=[itemid_to_id[9999999]],  # !!!
+#                           recalculate_user=False)]
+#    return res
+
+#def get_rec(model, ctm, x):
+    # Тут нет фильтрации по СТМ !! - в ДЗ нужно будет добавить
+#    recs = model.similar_items(itemid_to_id[x], N=50)  # Returns list of (itemid, score) tuples, sorted by score
+#    score = 0
+#    for item in recs:
+#        if item[0] not in ctm:
+#            recs.remove(item)
+
+#    top_rec = recs[1][0]
+
+#    return id_to_itemid[top_rec]
